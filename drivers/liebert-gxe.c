@@ -395,7 +395,7 @@ void upsdrv_initinfo(void)
 {
 	struct ydn23_frame sendframe, recvframe;
 	char databuf[11];
-	int retry, ret;
+	int retry, ret = -1;
 
 	ydn23_frame_init(&sendframe, YDN23_GET_VENDOR_INFO,
 			 "21", devaddr, NULL, 0);
