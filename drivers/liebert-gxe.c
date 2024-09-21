@@ -26,13 +26,22 @@
 #define DRIVER_NAME	"Liebert GXE Series UPS driver"
 #define DRIVER_VERSION	"0.01"
 
-#define SER_WAIT_SEC	1
 #define PROBE_RETRIES   3
+#define DEFAULT_STALE_RETRIES	3
 
 #define DATAFLAG_WARN_MASK (1)
 #define DATAFLAG_ONOFF_MASK (1 << 4)
 
 static char *devaddr = NULL;
+
+static int stale_retries = DEFAULT_STALE_RETRIES;
+static int stale_retry = DEFAULT_STALE_RETRIES;
+
+#define TRY_STALE()							\
+	if ((stale_retry--) > 0)					\
+		dstate_dataok();					\
+	else								\
+		dstate_datastale();					\
 
 #define ARRAY_SIZE(x) ((sizeof x) / (sizeof *x))
 static const char *gxe_warns[] = {
@@ -107,7 +116,7 @@ static int instcmd(const char *cmdname, const char *extra)
 		ret = ydn23_frame_send(upsfd, &sendframe);
 		if (ret <= 0) continue;
 
-		ret = ydn23_frame_read(upsfd, &recvframe, 1, 0);
+		ret = ydn23_frame_read(upsfd, &recvframe, 2, 0);
 		if (ret > 0) {
 			poll_state = GXE_SYSPARAM;
 			return STAT_INSTCMD_HANDLED;
@@ -120,25 +129,27 @@ static int instcmd(const char *cmdname, const char *extra)
 
 static void upsdrv_updateinfo_onoff(void)
 {
-	int ret, dflag, pwrval, rectval;
-	struct ydn23_frame frame;
+	int retry, ret = -1, dflag, pwrval, rectval;
+	struct ydn23_frame sendframe, frame;
 
-	ydn23_frame_init(&frame, YDN23_GET_ONOFF_DATA, "21", devaddr, NULL, 0);
+	ydn23_frame_init(&sendframe, YDN23_GET_ONOFF_DATA,
+			 "21", devaddr, NULL, 0);
 
-	ret = ydn23_frame_send(upsfd, &frame);
-	if (ret <= 0) {
-		upslogx(LOG_WARNING, "failed sending ONOFF request, retry");
-		dstate_datastale();
-		return;
+	for (retry = 0; retry < PROBE_RETRIES; retry++) {
+		ret = ydn23_frame_send(upsfd, &sendframe);
+		if (ret <= 0) continue;
+		ret = ydn23_frame_read(upsfd, &frame, 2, 0);
+		if (ret > 0)
+			break;
 	}
 
-	ret = ydn23_frame_read(upsfd, &frame, 1, 0);
 	if (ret <= 0) {
 		upslogx(LOG_WARNING, "failed reading ONOFF data, retry");
-		dstate_datastale();
+		TRY_STALE()
 		return;
 	}
 
+	stale_retry = stale_retries;
 	poll_state = GXE_ANALOG;
 
 	/* DATAFLAG */
@@ -200,25 +211,27 @@ static void upsdrv_updateinfo_onoff(void)
 
 static void upsdrv_updateinfo_analog(void)
 {
-	struct ydn23_frame frame;
-	int ret, dflag, volt;
+	struct ydn23_frame sendframe, frame;
+	int retry, ret = -1, dflag, volt;
 
-	ydn23_frame_init(&frame, YDN23_GET_ANALOG_DATA_D,
+	ydn23_frame_init(&sendframe, YDN23_GET_ANALOG_DATA_D,
 			 "21", devaddr, NULL, 0);
 
-	ret = ydn23_frame_send(upsfd, &frame);
+	for (retry = 0; retry < PROBE_RETRIES; retry++) {
+		ret = ydn23_frame_send(upsfd, &sendframe);
+		if (ret <= 0) continue;
+		ret = ydn23_frame_read(upsfd, &frame, 2, 0);
+		if (ret > 0)
+			break;
+	}
+
 	if (ret <= 0) {
-		upslogx(LOG_WARNING, "failed sending ANALOG request, retry");
-		dstate_datastale();
+		upslogx(LOG_WARNING, "failed reading ANALOG data, retry");
+		TRY_STALE()
 		return;
 	}
 
-	ret = ydn23_frame_read(upsfd, &frame, 1, 0);
-	if (ret <= 0) {
-		upslogx(LOG_WARNING, "failed reading ANALOG data, retry");
-		dstate_datastale();
-		return;
-	}
+	stale_retry = stale_retries;
 
 	/* DATAFLAG, NOT RELIABLE SOMEHOW */
 	dflag = ydn23_val_from_hex(frame.INFO, 2);
@@ -278,26 +291,27 @@ static void upsdrv_updateinfo_analog(void)
 
 static void upsdrv_updateinfo_sysparam(void)
 {
-	struct ydn23_frame frame;
-	int ret;
+	struct ydn23_frame sendframe, frame;
+	int retry, ret = -1;
 
-	ydn23_frame_init(&frame, YDN23_GET_SYS_PARAM_D,
+	ydn23_frame_init(&sendframe, YDN23_GET_SYS_PARAM_D,
 			 "21", devaddr, NULL, 0);
 
-	ret = ydn23_frame_send(upsfd, &frame);
-	if (ret <= 0) {
-		upslogx(LOG_WARNING, "failed sending SYSPARAM request, retry");
-		dstate_datastale();
-		return;
+	for (retry = 0; retry < PROBE_RETRIES; retry++) {
+		ret = ydn23_frame_send(upsfd, &sendframe);
+		if (ret <= 0) continue;
+		ret = ydn23_frame_read(upsfd, &frame, 2, 0);
+		if (ret > 0)
+			break;
 	}
 
-	ret = ydn23_frame_read(upsfd, &frame, 1, 0);
 	if (ret <= 0) {
 		upslogx(LOG_WARNING, "failed reading SYSPARAM data, retry");
-		dstate_datastale();
+		TRY_STALE()
 		return;
 	}
 
+	stale_retry = stale_retries;
 	poll_state = GXE_WARNING;
 
 	/* Field 6, Nominal Voltage */
@@ -322,27 +336,28 @@ static void upsdrv_updateinfo_sysparam(void)
 
 static void upsdrv_updateinfo_warning(void)
 {
-	struct ydn23_frame frame;
-	int ret, val;
+	struct ydn23_frame sendframe, frame;
+	int retry, ret = -1, val;
 	size_t i;
 
-	ydn23_frame_init(&frame, YDN23_GET_WARNING_DATA,
+	ydn23_frame_init(&sendframe, YDN23_GET_WARNING_DATA,
 			 "21", devaddr, NULL, 0);
 
-	ret = ydn23_frame_send(upsfd, &frame);
-	if (ret <= 0) {
-		upslogx(LOG_WARNING, "failed sending WARNING request, retry");
-		dstate_datastale();
-		return;
+	for (retry = 0; retry < PROBE_RETRIES; retry++) {
+		ret = ydn23_frame_send(upsfd, &sendframe);
+		if (ret <= 0) continue;
+		ret = ydn23_frame_read(upsfd, &frame, 2, 0);
+		if (ret > 0)
+			break;
 	}
 
-	ret = ydn23_frame_read(upsfd, &frame, 1, 0);
 	if (ret <= 0) {
 		upslogx(LOG_WARNING, "failed reading WARNING data, retry");
-		dstate_datastale();
+		TRY_STALE()
 		return;
 	}
 
+	stale_retry = stale_retries;
 	poll_state = GXE_ONOFF;
 
 	alarm_init();
@@ -352,6 +367,8 @@ static void upsdrv_updateinfo_warning(void)
 		val = ydn23_val_from_hex(YDN23_FRAME_REG(frame, 1+i), 2);
 		switch(val)  {
 		case 0x00:
+		case 0x0e:
+		case 0xe0:
 			break;
 		case 0x01:
 		case 0x02:
@@ -403,7 +420,7 @@ void upsdrv_initinfo(void)
 	for (retry = 0; retry < PROBE_RETRIES; retry++) {
 		ret = ydn23_frame_send(upsfd, &sendframe);
 		if (ret <= 0) continue;
-		ret = ydn23_frame_read(upsfd, &recvframe, 1, 0);
+		ret = ydn23_frame_read(upsfd, &recvframe, 2, 0);
 		if (ret > 0)
 			break;
 	}
@@ -435,6 +452,7 @@ void upsdrv_help(void)
 void upsdrv_makevartable(void)
 {
 	addvar(VAR_VALUE, "addr", "Override default UPS address");
+	addvar(VAR_VALUE, "retry", "Override default retry");
 }
 
 void upsdrv_initups(void)
@@ -445,11 +463,10 @@ void upsdrv_initups(void)
 	if (testvar("addr"))
 		devaddr = getval("addr");
 
-	/* UPS behaves wird on the serial line. If two frames arrived in
-	 * a brust, the device will only response to the first frame. After
-	 * testing, the minimum interval is 5 sec which's already beyond the
-	 * stale tolerance.
-	 */
+	if (testvar("retry"))
+		stale_retries = atoi(getval("retry"));
+
+	stale_retry = stale_retries;
 	poll_interval = 5;
 
 	usleep(100000);

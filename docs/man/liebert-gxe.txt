@@ -34,11 +34,11 @@ This driver supports the following optional settings in linkman:ups.conf[5]:
 *addr=*'num'::
 Set the address of the UPS - 01 (default) ~ 99.
 
-BUGS
-----
-
-The UPS completely ignores the command if sent too quick. poll_interval is
-around 5 sec. If you constantly receive driver stall, increase poll_interval.
+*retry=*'num'::
+Set the max times of read failures. (UPS sometimes ignores the incoming
+command and causes driver stales. The driver will ignore *retry* failures if
+occurred in a row. However, this does increase the latency if a real stale
+happened. Default to 3)
 
 AUTHORS
 -------
